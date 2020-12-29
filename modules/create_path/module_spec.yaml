@@ -1,0 +1,40 @@
+amlModuleIdentifier:
+  namespace: BingCR/freeforms
+  moduleName: "create path"
+  moduleVersion: 0.0.1
+description: "a module to convert a path (string) to a path file (data)  \nContact: ali.mahmoudzadeh@microsoft.com"
+metadata:
+  annotations:
+    tags:
+    - BingCR
+    contact: amah@microsoft.com
+    helpDocument: https://aka.ms/aml/smartcompose
+isDeterministic: True
+
+inputs:
+- name: path_to_file
+  type: String
+  description: path on cosmos
+outputs:
+- name: file_path
+  type: AnyDirectory
+  description: file_path
+implementation:
+  container:
+    amlEnvironment:
+      python:
+        condaDependencies:
+          name: project_environment
+          channels:
+            - defaults
+          dependencies:
+            - python=3.6.8
+            - pip:
+              - azureml-defaults==1.15.0
+              - azureml-core==1.15.0
+    command: [python, step_run.py]
+    args: [
+      --path_to_file, {inputValue: path_to_file},
+      --file_path, {outputPath: file_path},
+    ]
+

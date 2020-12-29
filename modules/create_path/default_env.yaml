@@ -1,0 +1,10 @@
+
+name: default_env
+channels:
+    - defaults
+dependencies:
+    - python=3.6.8
+    - pip:
+        - azureml-sdk==0.1.0.*
+        - azureml-defaults==1.15.0
+        - azureml-core==1.15.0
