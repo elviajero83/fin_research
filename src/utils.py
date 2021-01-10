@@ -232,3 +232,53 @@ def select_first_file(path):
         raise ValueError("expected exactly one file in directory")
     # log(logging.INFO, DataCategory.ONLY_PUBLIC_DATA, "Selecting {}".format(files[0]))
     return os.path.join(path, files[0])
+
+def TW_avg(df, datetime_col, keys, timestamp_cutoffs, fillforward=True):
+    # Forward Fill    
+    if fillforward:
+        for key in keys:
+            df[key] = df[key].fillna(method='ffill')
+            df['L1-'+key] = df[key].shift(1)
+
+    # Form the interval groups based on the timestamps provided. The code doesn't automatically create any intervals at the 
+    # begining and end of data. If desired the intervals should be explicitly passed to the function.
+    df['Group'] = pd.cut(df[datetime_col], timestamp_cutoffs)
+    df['Group Open'] = pd.IntervalIndex(df['Group']).get_level_values(0).left
+    df['Group Close'] = pd.IntervalIndex(df['Group']).get_level_values(0).right
+
+    # Forward Deltas
+    df['F Delta'] = (df['Date-Time'].shift(-1)-df['Date-Time']).dt.total_seconds()
+    df['F Delta 2'] = (df['Group Close']-df[datetime_col]).dt.total_seconds()
+    df['F Delta 3'] = np.where((df['F Delta'] < df['F Delta 2']) | (df['F Delta'].isna()), df['F Delta'], df['F Delta 2'])
+
+    # Backward Deltas
+    df['B Delta'] = df['F Delta'].shift(1)
+    df['B Delta 2'] = (df[datetime_col] - df['Group Open']).dt.total_seconds()
+    df['B Delta 3'] = np.where((df['B Delta'] < df['B Delta 2']) | (df['B Delta'].isna()), np.NaN, df['B Delta 2'])
+
+    # Variable * Delta
+    for key in keys:
+        df[key + ' * Delta'] = df[key] * df['F Delta 3']
+        df['L1-' + key + ' * Delta'] = df['L1-' + key] * df['B Delta 3']
+
+    # Group dataframe based on cutoffs
+    df_grouped =  df.groupby(df['Group'])
+
+    # Emoty dataframe for aggregate measures
+    df_agg = pd.DataFrame()
+
+    # Open and Close of Variables
+    for key in keys:
+        df_agg[key + ' * Delta'] = df_grouped[key + ' * Delta'].sum()
+        df_agg[key + ' * Delta Open'] = df_grouped['L1-' + key + ' * Delta'].sum()
+        df_agg['Time Delta'] = df_grouped['F Delta 3'].sum() + df_grouped['B Delta 3'].sum()
+
+    df_agg['Bar Open Time Stamp'] =  pd.IntervalIndex(df_agg.index.get_level_values(0)).left
+    df_agg['Bar Close Time Stamp'] =  pd.IntervalIndex(df_agg.index.get_level_values(0)).right
+
+    for key in keys:
+        df_agg['TW Avg '+ key] = (df_agg[key + ' * Delta'] + df_agg[key + ' * Delta Open'] ) / df_agg['Time Delta']
+ 
+    return_cols = ['Time Delta', 'Bar Open Time Stamp', 'Bar Close Time Stamp'] + ['TW Avg '+key for key in keys]
+
+    return df_agg[return_cols]
