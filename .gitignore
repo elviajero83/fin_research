@@ -26,3 +26,4 @@ _build/
 dask-tutorial/
 *.log
 *.csv
+.vscode/
