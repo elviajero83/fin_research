@@ -1,6 +1,6 @@
 import pandas as pd
 import logging
-from azureml.core import Run, Experiment, Workspace, Datastore, Dataset
+#from azureml.core import Run, Experiment, Workspace, Datastore, Dataset
 import os
 import time
 import numpy as np
@@ -64,22 +64,20 @@ class data_process():
         if df[data_column].isnull().values.any():
             raise Exception("Price column contains NaN values.")
 
-        df['Trim Mean'] = df[data_column].rolling(
-            window=k, min_periods=k, center=True).apply(self.trim_mean, raw=True)
-        df['Trim Std'] = df[data_column].rolling(
-            window=k, min_periods=k, center=True).apply(self.trim_std, raw=True)
+        df['Trim Mean'] = df[data_column].rolling(window=k, min_periods=k, center=True).apply(self.trim_mean, raw=True)
+        df['Trim Std'] = df[data_column].rolling(window=k, min_periods=k, center=True).apply(self.trim_std, raw=True)
 
         # Recalculate for the first m observations
         top = df.head(n=k).copy(deep=True)
         top['Trim Mean'] = self.trim_mean(top[data_column].values)
         top['Trim Std'] = self.trim_std(top[data_column].values)
-        df[:m] = top
+        df[:m] = top[:m]
 
         # Recalculate for the last m observations
         bottom = df.tail(n=k).copy(deep=True)
         bottom['Trim Mean'] = self.trim_mean(bottom[data_column].values)
         bottom['Trim Std'] = self.trim_std(bottom[data_column].values)
-        df[-m:] = bottom
+        df[-m:] = bottom[-m:]
 
         # This line throws a warning if all observations result in NaNs
         df['PRICE_CHANGE'] = np.absolute(
@@ -96,6 +94,23 @@ class data_process():
         df.drop('Trim Std', 1, inplace=True)
 
         np.seterr(**old_setting)
+
+    # This function replaces any zero or negative values in columns in keys to nan    
+    def set_negatives_to_nan(self, df, keys):
+        for key in keys:
+            df[key] = np.where(df[key] <= 0, np.nan, df[key])
+
+    # Drops a row if it finds a nan value in any of the key columns
+    def drop_nans(self, df, keys):
+        df['condition'] = 0
+        for key in keys:
+            df['condition'] = df['condition'] | df[key].isnull()
+        
+        df.drop(df[df['condition'] == 1].index, inplace= True)         
+        df.drop('condition', 1, inplace=True)
+        df.reset_index()
+
+        
 
 
 def merge_simultanous_rows(x):
@@ -238,7 +253,10 @@ def TW_avg(df, datetime_col, keys, timestamp_cutoffs, fillforward=True):
     if fillforward:
         for key in keys:
             df[key] = df[key].fillna(method='ffill')
-            df['L1-'+key] = df[key].shift(1)
+    
+    #  Lag Variables
+    for key in keys:
+        df['L1-'+key] = df[key].shift(1)
 
     # Form the interval groups based on the timestamps provided. The code doesn't automatically create any intervals at the 
     # begining and end of data. If desired the intervals should be explicitly passed to the function.
