@@ -45,9 +45,28 @@ def run(mini_batch):
         new_train_cols = [f"{col}_diff_1" for col in base_train_cols]
         df_1day_bars[new_train_cols] = df_1day_bars[base_train_cols].diff()
         train_cols = (
-            base_train_cols
-            + new_train_cols
-            + ["BidAskRatio", "TWBidAskRatio", "dailyVolatility"]
+            base_train_cols  # basic columns to have first diff
+            + new_train_cols  # added diffs
+            + ["BidAskRatio", "TWBidAskRatio"]  # newly calclulated cols
+            + [
+                "dailyVolatility",
+                "Spread",
+                "Mid Quote",
+                "Smart Price",
+                "Quote Imbalance",
+                "TW Avg Ask Price",
+                "TW Avg Ask Size",
+                "TW Avg Bid Price",
+                "TW Avg Bid Size",
+                "TW Avg Spread",
+                "TW Avg Mid Quote",
+                "TW Avg Smart Price",
+                "TW Avg Quote Imbalance",
+                "Order Imbalance",
+                "Close Price",
+                "Avg Trade Size",
+                "Net SellBuy Count",
+            ]
         )
 
         df_1day_bars = df_1day_bars[train_cols + label_col]

@@ -4,6 +4,8 @@ from azureml.core import Run, Experiment, Workspace, Datastore, Dataset
 import os
 import time
 import numpy as np
+from datetime import datetime, timedelta
+import sys
 
 
 class data_process:
@@ -79,13 +81,13 @@ class data_process:
         top = df.head(n=k).copy(deep=True)
         top["Trim Mean"] = self.trim_mean(top[data_column].values)
         top["Trim Std"] = self.trim_std(top[data_column].values)
-        df[:m] = top
+        df[:m] = top[:m]
 
         # Recalculate for the last m observations
         bottom = df.tail(n=k).copy(deep=True)
         bottom["Trim Mean"] = self.trim_mean(bottom[data_column].values)
         bottom["Trim Std"] = self.trim_std(bottom[data_column].values)
-        df[-m:] = bottom
+        df[-m:] = bottom[-m:]
 
         # This line throws a warning if all observations result in NaNs
         df["PRICE_CHANGE"] = np.absolute(df[data_column] - df[data_column].shift(1))
@@ -103,6 +105,21 @@ class data_process:
         df.drop("Trim Std", 1, inplace=True)
 
         np.seterr(**old_setting)
+
+    # This function replaces any zero or negative values in columns in keys to nan
+    def set_negatives_to_nan(self, df, keys):
+        for key in keys:
+            df[key] = np.where(df[key] <= 0, np.nan, df[key])
+
+    # Drops a row if it finds a nan value in any of the key columns
+    def drop_nans(self, df, keys):
+        df["condition"] = 0
+        for key in keys:
+            df["condition"] = df["condition"] | df[key].isnull()
+
+        df.drop(df[df["condition"] == 1].index, inplace=True)
+        df.drop("condition", 1, inplace=True)
+        df.reset_index()
 
 
 def merge_simultanous_rows(x):
@@ -322,3 +339,21 @@ def TW_avg(input_df, datetime_col, keys, timestamp_cutoffs, fillforward=True):
     ]
     df_agg.reset_index(inplace=True)
     return df_agg[return_cols]
+
+
+def trim_df_to_time(df, start_str, end_str):
+    df["Time"] = df.loc[:, "Date-Time"].apply(lambda x: str(x)[11:-10])
+    df["Time"] = pd.to_datetime(df["Time"], format="%H:%M:%S.%f")
+    print("full df shape", df.shape)
+    df = df[df["Time"] >= datetime.strptime(start_str, "%H:%M:%S.%f")]
+    print(">8:30  df shape", df.shape)
+    df = df[df["Time"] <= datetime.strptime(end_str, "%H:%M:%S.%f")]
+    print("time-trimmed df shape", df.shape)
+    df.reset_index(inplace=True, drop=True)
+
+    df["Date-Time"] = pd.to_datetime(df["Date-Time"])
+    return df
+
+
+def safe_division(n, d):
+    return n / d if d else sys.maxsize
