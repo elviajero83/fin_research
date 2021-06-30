@@ -27,3 +27,5 @@ dask-tutorial/
 *.log
 *.csv
 .vscode/
+notebooks/outputs/
+notebooks/downloaded_models/
