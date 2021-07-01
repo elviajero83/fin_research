@@ -1,6 +1,7 @@
 sklearn
 azureml-core==1.31.0
 azureml-dataset-runtime==1.31.0
+azureml-pipeline==1.31.0
 pandas
 numpy
 matplotlib

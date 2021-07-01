@@ -6,7 +6,7 @@
 3. clone this repo and navigate to it
 4. create a new env 
 
-   `conda create --name aml pip`
+   `conda create --name aml pip==20.3.3 python=3.7`
    `conda activate aml`
 5. install the requiremnts
    `pip install -r requirements.txt`
