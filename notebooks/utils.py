@@ -4,6 +4,7 @@ from azureml.core import Run, Experiment, Workspace, Datastore, Dataset
 import os
 import time
 import numpy as np
+import csv
 from datetime import datetime, timedelta
 
 
@@ -90,15 +91,11 @@ class data_process:
 
         # This line throws a warning if all observations result in NaNs
         df["PRICE_CHANGE"] = np.absolute(df[data_column] - df[data_column].shift(1))
-        df["PRICE_CHANGE"] = np.where(
-            df["PRICE_CHANGE"] == 0, np.nan, df["PRICE_CHANGE"]
-        )
+        df["PRICE_CHANGE"] = np.where(df["PRICE_CHANGE"] == 0, np.nan, df["PRICE_CHANGE"])
         MIN_PRICE_CHANGE = df["PRICE_CHANGE"].min()
         gamma = gamma_multiple * MIN_PRICE_CHANGE
 
-        df["Outlier"] = ~(
-            np.abs(df[data_column] - df["Trim Mean"]) < 3 * df["Trim Std"] + gamma
-        )
+        df["Outlier"] = ~(np.abs(df[data_column] - df["Trim Mean"]) < 3 * df["Trim Std"] + gamma)
         df.drop("PRICE_CHANGE", 1, inplace=True)
         df.drop("Trim Mean", 1, inplace=True)
         df.drop("Trim Std", 1, inplace=True)
@@ -170,9 +167,7 @@ def compute_label_long(events, current_ind, pt_level, sl_level, wait_time):
     sl_price = events.loc[current_ind, "Bid Price"] * (1 - (sl_level * volatility))
     end_time = events.loc[current_ind, "Date-Time"] + wait_time
     last_ind = events.index.max()
-    end_ind = int(
-        np.nanmin([events[events["Date-Time"] > end_time].index.min(), last_ind])
-    )
+    end_ind = int(np.nanmin([events[events["Date-Time"] > end_time].index.min(), last_ind]))
     prices = events.loc[current_ind:end_ind, "Bid Price"]
     pt_ind = prices[prices > pt_price].index.min()
     sl_ind = prices[prices < sl_price].index.min()
@@ -184,17 +179,11 @@ def compute_label(events, current_ind, pt_level, sl_level, wait_time):
     volatility = events.loc[current_ind, "dailyVolatility"]
     pt_price_long = events.loc[current_ind, "Bid Price"] * (1 + (pt_level * volatility))
     sl_price_long = events.loc[current_ind, "Bid Price"] * (1 - (sl_level * volatility))
-    pt_price_short = events.loc[current_ind, "Ask Price"] * (
-        1 - (pt_level * volatility)
-    )
-    sl_price_short = events.loc[current_ind, "Ask Price"] * (
-        1 + (sl_level * volatility)
-    )
+    pt_price_short = events.loc[current_ind, "Ask Price"] * (1 - (pt_level * volatility))
+    sl_price_short = events.loc[current_ind, "Ask Price"] * (1 + (sl_level * volatility))
     end_time = events.loc[current_ind, "Date-Time"] + wait_time
     last_ind = events.index.max()
-    end_ind = int(
-        np.nanmin([events[events["Date-Time"] > end_time].index.min(), last_ind])
-    )
+    end_ind = int(np.nanmin([events[events["Date-Time"] > end_time].index.min(), last_ind]))
     prices_long = events.loc[current_ind:end_ind, "Bid Price"]
     prices_short = events.loc[current_ind:end_ind, "Ask Price"]
     pt_long_ind = prices_long[prices_long > pt_price_long].index.min()
@@ -236,12 +225,12 @@ def set_df_labels(df, pt_level, sl_level, wait_time, inds):
         ] = compute_label(df, inds[i], pt_level, sl_level, wait_time)
     df_bars.reset_index(inplace=True)
     df_bars.rename(columns={"index": "original_index"}, inplace=True)
-    df_bars["long_label"] = df_bars.loc[
-        :, ["pt_long_ind", "sl_long_ind", "end_ind"]
-    ].apply(setlabel, axis=1)
-    df_bars["short_label"] = df_bars.loc[
-        :, ["pt_short_ind", "sl_short_ind", "end_ind"]
-    ].apply(setlabel, axis=1)
+    df_bars["long_label"] = df_bars.loc[:, ["pt_long_ind", "sl_long_ind", "end_ind"]].apply(
+        setlabel, axis=1
+    )
+    df_bars["short_label"] = df_bars.loc[:, ["pt_short_ind", "sl_short_ind", "end_ind"]].apply(
+        setlabel, axis=1
+    )
 
     return df_bars
 
@@ -317,16 +306,10 @@ def TW_avg(input_df, datetime_col, keys, timestamp_cutoffs, fillforward=True):
     for key in keys:
         df_agg[key + " * Delta"] = df_grouped[key + " * Delta"].sum()
         df_agg[key + " * Delta Open"] = df_grouped["L1-" + key + " * Delta"].sum()
-        df_agg["Time Delta"] = (
-            df_grouped["F Delta 3"].sum() + df_grouped["B Delta 3"].sum()
-        )
+        df_agg["Time Delta"] = df_grouped["F Delta 3"].sum() + df_grouped["B Delta 3"].sum()
 
-    df_agg["Bar Open Time Stamp"] = pd.IntervalIndex(
-        df_agg.index.get_level_values(0)
-    ).left
-    df_agg["Bar Close Time Stamp"] = pd.IntervalIndex(
-        df_agg.index.get_level_values(0)
-    ).right
+    df_agg["Bar Open Time Stamp"] = pd.IntervalIndex(df_agg.index.get_level_values(0)).left
+    df_agg["Bar Close Time Stamp"] = pd.IntervalIndex(df_agg.index.get_level_values(0)).right
 
     for key in keys:
         df_agg["TW Avg " + key] = (
@@ -352,3 +335,16 @@ def trim_df_to_time(df, start_str, end_str):
 
     df["Date-Time"] = pd.to_datetime(df["Date-Time"])
     return df
+
+
+def save_report(model_name, gain_precision, single_unit_strategy, file_path, file_name):
+    # data = ["model","time_steps","task","weights","gain_precision"]
+    data = model_name.split("_")
+    data.append("{:.2f}".format(gain_precision))
+    data.append("{}".format(single_unit_strategy))
+    with open(os.path.join(file_path, file_name), "a") as csv_file:
+        writer = csv.writer(csv_file, delimiter=",")
+        writer.writerow(data)
+    report_df = pd.read_csv(os.path.join(file_path, "model_results.csv"), compression="infer")
+    print(report_df.shape)
+    print(report_df.head())

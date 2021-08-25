@@ -91,15 +91,11 @@ class data_process:
 
         # This line throws a warning if all observations result in NaNs
         df["PRICE_CHANGE"] = np.absolute(df[data_column] - df[data_column].shift(1))
-        df["PRICE_CHANGE"] = np.where(
-            df["PRICE_CHANGE"] == 0, np.nan, df["PRICE_CHANGE"]
-        )
+        df["PRICE_CHANGE"] = np.where(df["PRICE_CHANGE"] == 0, np.nan, df["PRICE_CHANGE"])
         MIN_PRICE_CHANGE = df["PRICE_CHANGE"].min()
         gamma = gamma_multiple * MIN_PRICE_CHANGE
 
-        df["Outlier"] = ~(
-            np.abs(df[data_column] - df["Trim Mean"]) < 3 * df["Trim Std"] + gamma
-        )
+        df["Outlier"] = ~(np.abs(df[data_column] - df["Trim Mean"]) < 3 * df["Trim Std"] + gamma)
         df.drop("PRICE_CHANGE", 1, inplace=True)
         df.drop("Trim Mean", 1, inplace=True)
         df.drop("Trim Std", 1, inplace=True)
@@ -120,6 +116,15 @@ class data_process:
         df.drop(df[df["condition"] == 1].index, inplace=True)
         df.drop("condition", 1, inplace=True)
         df.reset_index()
+
+    def remove_negatives(self, df, keys):
+        self.set_negatives_to_nan(df, keys)
+        self.drop_nans(df, keys)
+
+    def remove_outliers(self, df, m, gamma_multiple, data_column="Price"):
+        self.detect_outliers(df, m, gamma_multiple, data_column)
+        df[data_column] = np.where(df["Outlier"], np.nan, df[data_column])
+        self.drop_nans(df, [data_column])
 
 
 def merge_simultanous_rows(x):
@@ -165,45 +170,68 @@ def scale(x):
     return x / x.mean()
 
 
-def compute_label_long(events, current_ind, pt_level, sl_level, wait_time):
-    volatility = events.loc[current_ind, "dailyVolatility"]
-    pt_price = events.loc[current_ind, "Bid Price"] * (1 + (pt_level * volatility))
-    sl_price = events.loc[current_ind, "Bid Price"] * (1 - (sl_level * volatility))
-    end_time = events.loc[current_ind, "Date-Time"] + wait_time
-    last_ind = events.index.max()
-    end_ind = int(
-        np.nanmin([events[events["Date-Time"] > end_time].index.min(), last_ind])
-    )
-    prices = events.loc[current_ind:end_ind, "Bid Price"]
-    pt_ind = prices[prices > pt_price].index.min()
-    sl_ind = prices[prices < sl_price].index.min()
-    # print(current_ind, (pt_ind, sl_ind, end_ind))
-    return (pt_ind, sl_ind, end_ind)
+# def compute_label_long(events, current_ind, pt_level, sl_level, wait_time):
+#     volatility = events.loc[current_ind, "dailyVolatility"]
+#     pt_price = events.loc[current_ind, "Bid Price"] * (1 + (pt_level * volatility))
+#     sl_price = events.loc[current_ind, "Bid Price"] * (1 - (sl_level * volatility))
+#     end_time = events.loc[current_ind, "Date-Time"] + wait_time
+#     last_ind = events.index.max()
+#     end_ind = int(
+#         np.nanmin([events[events["Date-Time"] > end_time].index.min(), last_ind])
+#     )
+#     prices = events.loc[current_ind:end_ind, "Bid Price"]
+#     pt_ind = prices[prices > pt_price].index.min()
+#     sl_ind = prices[prices < sl_price].index.min()
+#     # print(current_ind, (pt_ind, sl_ind, end_ind))
+#     return (pt_ind, sl_ind, end_ind)
 
 
 def compute_label(events, current_ind, pt_level, sl_level, wait_time):
     volatility = events.loc[current_ind, "dailyVolatility"]
-    pt_price_long = events.loc[current_ind, "Bid Price"] * (1 + (pt_level * volatility))
-    sl_price_long = events.loc[current_ind, "Bid Price"] * (1 - (sl_level * volatility))
-    pt_price_short = events.loc[current_ind, "Ask Price"] * (
-        1 - (pt_level * volatility)
-    )
-    sl_price_short = events.loc[current_ind, "Ask Price"] * (
-        1 + (sl_level * volatility)
-    )
+    pt_price_long = events.loc[current_ind, "Ask Price"] * (1 + (pt_level * volatility))
+    sl_price_long = events.loc[current_ind, "Ask Price"] * (1 - (sl_level * volatility))
+    pt_price_short = events.loc[current_ind, "Bid Price"] * (1 - (pt_level * volatility))
+    sl_price_short = events.loc[current_ind, "Bid Price"] * (1 + (sl_level * volatility))
     end_time = events.loc[current_ind, "Date-Time"] + wait_time
     last_ind = events.index.max()
-    end_ind = int(
-        np.nanmin([events[events["Date-Time"] > end_time].index.min(), last_ind])
-    )
+    end_ind = int(np.nanmin([events[events["Date-Time"] > end_time].index.min(), last_ind]))
     prices_long = events.loc[current_ind:end_ind, "Bid Price"]
     prices_short = events.loc[current_ind:end_ind, "Ask Price"]
     pt_long_ind = prices_long[prices_long > pt_price_long].index.min()
     sl_long_ind = prices_long[prices_long < sl_price_long].index.min()
     pt_short_ind = prices_short[prices_short < pt_price_short].index.min()
     sl_short_ind = prices_short[prices_short > sl_price_short].index.min()
-    # print(current_ind, (pt_ind, sl_ind, end_ind))
-    return (pt_long_ind, sl_long_ind, pt_short_ind, sl_short_ind, end_ind)
+    short_label = setlabel((pt_short_ind, sl_short_ind, end_ind))
+    short_return = (
+        prices_short[current_ind] - prices_short[np.nanmin((pt_short_ind, sl_short_ind, end_ind))]
+    )
+    short_duration = (
+        events.loc[np.nanmin((pt_short_ind, sl_short_ind, end_ind)), "Date-Time"]
+        - events.loc[current_ind, "Date-Time"]
+    )
+    long_label = setlabel((pt_long_ind, sl_long_ind, end_ind))
+    long_return = (
+        prices_long[np.nanmin((pt_long_ind, sl_long_ind, end_ind))] - prices_long[current_ind]
+    )
+    long_duration = (
+        events.loc[np.nanmin((pt_long_ind, sl_long_ind, end_ind)), "Date-Time"]
+        - events.loc[current_ind, "Date-Time"]
+    )
+    return np.array(
+        (
+            long_label,
+            long_return,
+            long_duration,
+            pt_long_ind,
+            sl_long_ind,
+            short_label,
+            short_return,
+            short_duration,
+            pt_short_ind,
+            sl_short_ind,
+            end_ind,
+        )
+    )
 
 
 def setlabel(x):
@@ -221,29 +249,35 @@ def set_df_labels(df, pt_level, sl_level, wait_time, inds):
     df["pt_short_ind"] = np.nan
     df["sl_short_ind"] = np.nan
     df["end_ind"] = np.nan
-    # vol = df['Acc Volume']
-    # vol_levels = range(vol_tick, int(max(vol)), vol_tick)
-    # inds = []
-    # for level in vol_levels:
-    #     ind = vol[vol > level].index.min()
-    #     inds.append(ind)
+    df["long_label"] = np.nan
+    df["short_label"] = np.nan
+    df["long_return"] = np.nan
+    df["short_return"] = np.nan
+    df["long_duration"] = np.nan
+    df["short_duration"] = np.nan
     df_bars = df.loc[inds].copy()
     # print(df_bars.columns)
     for i in range(len(df_bars)):
-        # print(i)
         df_bars.loc[
             inds[i],
-            ["pt_long_ind", "sl_long_ind", "pt_short_ind", "sl_short_ind", "end_ind"],
+            [
+                "long_label",
+                "long_return",
+                "long_duration",
+                "pt_long_ind",
+                "sl_long_ind",
+                "short_label",
+                "short_return",
+                "short_duration",
+                "pt_short_ind",
+                "sl_short_ind",
+                "end_ind",
+            ],
         ] = compute_label(df, inds[i], pt_level, sl_level, wait_time)
     df_bars.reset_index(inplace=True)
     df_bars.rename(columns={"index": "original_index"}, inplace=True)
-    df_bars["long_label"] = df_bars.loc[
-        :, ["pt_long_ind", "sl_long_ind", "end_ind"]
-    ].apply(setlabel, axis=1)
-    df_bars["short_label"] = df_bars.loc[
-        :, ["pt_short_ind", "sl_short_ind", "end_ind"]
-    ].apply(setlabel, axis=1)
 
+    print(df_bars.columns)
     return df_bars
 
 
@@ -318,16 +352,10 @@ def TW_avg(input_df, datetime_col, keys, timestamp_cutoffs, fillforward=True):
     for key in keys:
         df_agg[key + " * Delta"] = df_grouped[key + " * Delta"].sum()
         df_agg[key + " * Delta Open"] = df_grouped["L1-" + key + " * Delta"].sum()
-        df_agg["Time Delta"] = (
-            df_grouped["F Delta 3"].sum() + df_grouped["B Delta 3"].sum()
-        )
+        df_agg["Time Delta"] = df_grouped["F Delta 3"].sum() + df_grouped["B Delta 3"].sum()
 
-    df_agg["Bar Open Time Stamp"] = pd.IntervalIndex(
-        df_agg.index.get_level_values(0)
-    ).left
-    df_agg["Bar Close Time Stamp"] = pd.IntervalIndex(
-        df_agg.index.get_level_values(0)
-    ).right
+    df_agg["Bar Open Time Stamp"] = pd.IntervalIndex(df_agg.index.get_level_values(0)).left
+    df_agg["Bar Close Time Stamp"] = pd.IntervalIndex(df_agg.index.get_level_values(0)).right
 
     for key in keys:
         df_agg["TW Avg " + key] = (
@@ -357,3 +385,90 @@ def trim_df_to_time(df, start_str, end_str):
 
 def safe_division(n, d):
     return n / d if d else sys.maxsize
+
+
+def enrich_with_trades_features(df_quotes, quotes_keys, df_trades):
+    """attach the new cols based on merged trades and quotes
+       it exects trades has 'Price' and 'Acc Volume' and quotes
+       has quotes_keys
+
+    Args:
+        df_quotes ([type]): [description]
+        quotes_keys ([type]): [description]
+        df_trades ([type]): [description]
+    """
+    # Forward fill quotes
+    for key in quotes_keys:
+        df_quotes[key] = df_quotes[key].fillna(method="ffill")
+
+    # Form lag(price) with distinct value
+    df_trades["temp_lag_price"] = df_trades["Price"].shift(1)
+    df_trades["Lag(Price) Distinct"] = np.where(
+        df_trades["temp_lag_price"] == df_trades["Price"],
+        np.NaN,
+        df_trades["temp_lag_price"],
+    )
+    df_trades["Lag(Price) Distinct"].ffill(inplace=True)
+    df_trades.drop("temp_lag_price", 1, inplace=True)
+
+    # Merge Quotes and Trades
+    df_quotes["Type"] = "Quote"
+    df_all = pd.concat(
+        [
+            df_quotes[["Date-Time", "Type", "Ask Price", "Bid Price", "Seq. No."]],
+            df_trades[
+                [
+                    "Date-Time",
+                    "Price",
+                    "Lag(Price) Distinct",
+                    "Acc Volume",
+                    "Seq. No.",
+                ]
+            ],
+        ],
+        sort=True,
+    ).sort_values(by=["Date-Time", "Seq. No."])
+
+    df_all["Type"].fillna(value="Trade", inplace=True)
+    df_all["Ask Price"].ffill(inplace=True)
+    df_all["Bid Price"].ffill(inplace=True)
+    df_trades_all = df_all[df_all["Type"] == "Trade"].copy(deep=True)
+    df_trades_all.reset_index(drop=True, inplace=True)
+
+    # Mid Quote
+    df_trades_all["Mid Quote"] = (df_trades_all["Ask Price"] + df_trades_all["Bid Price"]) / 2
+
+    # Finding Tick Dir (Lee and Ready)
+    # Buy
+    df_trades_all["case1"] = np.where(df_trades_all["Price"] > df_trades_all["Mid Quote"], 1, 0)
+    # Sell
+    df_trades_all["case2"] = np.where(df_trades_all["Price"] < df_trades_all["Mid Quote"], -1, 0)
+    # Buy
+    df_trades_all["case3"] = np.where(
+        (df_trades_all["Price"] == df_trades_all["Mid Quote"])
+        & (df_trades_all["Price"] > df_trades_all["Lag(Price) Distinct"]),
+        1,
+        0,
+    )
+    # Sell
+    df_trades_all["case4"] = np.where(
+        (df_trades_all["Price"] == df_trades_all["Mid Quote"])
+        & (df_trades_all["Price"] < df_trades_all["Lag(Price) Distinct"]),
+        -1,
+        0,
+    )
+
+    df_trades_all["Tick Dir"] = (
+        df_trades_all["case1"]
+        + df_trades_all["case2"]
+        + df_trades_all["case3"]
+        + df_trades_all["case4"]
+    )
+    df_trades_all["Signed Trade SQRT"] = df_trades_all["Tick Dir"] * np.sqrt(
+        df_trades_all["Acc Volume"]
+    )
+    df_trades_all["Signed Trade"] = df_trades_all["Tick Dir"] * (df_trades_all["Acc Volume"])
+    print("df_trades_all:")
+    print(df_trades_all.head(5))
+
+    return df_trades_all

@@ -1,4 +1,5 @@
 import numpy as np
+import datetime
 
 
 def getWeights_FFD(d=0.1, thres=1e-5):
@@ -10,6 +11,20 @@ def getWeights_FFD(d=0.1, thres=1e-5):
         w.append(w_)
         k += 1
     return np.array(w[::-1]).reshape(-1, 1)
+
+
+def durationstr2seconds(duration_str):
+    if type(duration_str) == str and duration_str != "0 days 00:00:00":
+        given_time = datetime.datetime.strptime(duration_str[0:20], "0 days %H:%M:%S.%f")
+        seconds = (
+            given_time.hour * 3600
+            + given_time.minute * 60
+            + given_time.second
+            + given_time.microsecond / 1e6
+        )
+        return seconds
+    else:
+        return 0
 
 
 def fracDiff_FFD(mat, d, thres=1e-5):
@@ -29,7 +44,7 @@ def fracDiff_FFD(mat, d, thres=1e-5):
     return ffd
 
 
-def build_timeseries(mat, labels, steps=100):
+def build_timeseries(mat_data, mat_labels, steps=100):
     """
     Converts ndarray into timeseries format and supervised data format. Takes first TIME_STEPS
     number of rows as input and sets the TIME_STEPS+1th data as corresponding output and so on.
@@ -38,16 +53,19 @@ def build_timeseries(mat, labels, steps=100):
     to LSTM.
     """
     # total number of time-series samples would be len(mat) - TIME_STEPS
-    dim_0 = mat.shape[0] - steps
-    dim_1 = mat.shape[1]
+    dim_0 = mat_data.shape[0] - steps
+    dim_1 = mat_data.shape[1]
+    x = np.zeros((dim_0, steps, dim_1))
+
+    dim_0 = mat_labels.shape[0] - steps
+    dim_1 = mat_labels.shape[1]
     # print(dim_0, steps, dim_1)
     x = np.zeros((dim_0, steps, dim_1))
-    y = np.zeros((dim_0,))
     # print("dim_0", dim_0)
     #     for i in tqdm_notebook(range(dim_0)):
     for i in range(dim_0):
-        x[i] = mat[i : steps + i]
-        y[i] = labels[steps + i]
+        x[i] = mat_data[i : steps + i]
+        y[i] = mat_labels[steps + i]
     #         if i < 10:
     #           print(i,"-->", x[i,-1,:], y[i])
     print("length of time-series i/o", x.shape, y.shape)

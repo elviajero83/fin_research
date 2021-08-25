@@ -13,6 +13,7 @@ from utils import (
     data_process,
     trim_df_to_time,
     safe_division,
+    enrich_with_trades_features,
 )
 from azureml.core import Run, Experiment, Workspace, Datastore, Dataset
 from datetime import datetime, timedelta
@@ -28,9 +29,7 @@ def init():
     parser.add_argument("--pt_level", default="0.0001")
     parser.add_argument("--sl_level", default="0.0001")
     parser.add_argument("--vol_tick", type=int, default="1000")
-    parser.add_argument(
-        "--wait_time", type=int, default="600", help="time delta in seconds"
-    )
+    parser.add_argument("--wait_time", type=int, default="600", help="time delta in seconds")
     parser.add_argument(
         "--quotes_path",
         type=str,
@@ -44,6 +43,12 @@ def init():
         required=False,
         default="datasets/trades_merged_test",
         help="raw file",
+    )
+    parser.add_argument(
+        "--base_train_cols",
+        type=str,
+        required=False,
+        default="Bid Price,Ask Price,Bid Size,Ask Size",
     )
     parser.add_argument(
         "--data_output",
@@ -68,6 +73,12 @@ def init():
 def run(file_name, args):
     start = time.time()
     try:
+        cleaner = data_process()
+
+        # list of columns to be expanded by TWAvg and diff
+        base_train_cols = [c.strip() for c in args.base_train_cols.split(",")]
+        quotes_keys = ["Ask Price", "Ask Size", "Bid Price", "Bid Size"]
+
         print("******  Processing {}".format(os.path.basename(file_name)))
         df_quotes = pd.read_csv(file_name)
 
@@ -80,7 +91,7 @@ def run(file_name, args):
         )
         print("trimming quotes df")
         df_quotes = trim_df_to_time(df_quotes, "8:30:00.00", "15:00:00.00")
-
+        cleaner.remove_negatives(df_quotes, keys=quotes_keys)
         # reading the corresponding trades file
         # date_string = str(merged_df.loc[0, 'Date-Time'])[:10]
         trades_file_name = os.path.basename(file_name).replace("mq", "mt")
@@ -89,116 +100,10 @@ def run(file_name, args):
         df_trades = pd.read_csv(trades_file_path)
         print("loaded the corresponding trades file from {}".format(trades_file_path))
         df_trades = trim_df_to_time(df_trades, "8:30:00.00", "15:00:00.00")
+        cleaner.remove_negatives(df_trades, keys=["Price", "Acc Volume"])
+        cleaner.remove_outliers(df_trades, 40, 6, "Price")
 
-        # ***************************************************
-        # Clean Quotes and Trades
-        cleaner = data_process()
-
-        # Quotes
-        cleaner.set_negatives_to_nan(
-            df_quotes, keys=["Ask Price", "Bid Price", "Ask Size", "Bid Size"]
-        )
-        cleaner.drop_nans(
-            df_quotes, keys=["Ask Price", "Bid Price", "Ask Size", "Bid Size"]
-        )
-
-        # Trades
-        # Drop zero/negative
-        cleaner.set_negatives_to_nan(df_trades, keys=["Price", "Acc Volume"])
-        cleaner.drop_nans(df_trades, keys=["Price", "Acc Volume"])
-
-        # Detect outliers
-        cleaner.detect_outliers(df_trades, 40, 6, "Price")
-        df_trades["Price"] = np.where(df_trades["Outlier"], np.nan, df_trades["Price"])
-        df_trades["Acc Volume"] = np.where(
-            df_trades["Outlier"], np.nan, df_trades["Acc Volume"]
-        )
-        cleaner.set_negatives_to_nan(df_trades, keys=["Price", "Acc Volume"])
-        cleaner.drop_nans(df_trades, keys=["Price", "Acc Volume"])
-
-        keys = ["Ask Price", "Ask Size", "Bid Price", "Bid Size"]
-
-        # Forward fill quotes
-        for key in keys:
-            df_quotes[key] = df_quotes[key].fillna(method="ffill")
-
-        # Form lag(price) with distinct value
-        df_trades["temp_lag_price"] = df_trades["Price"].shift(1)
-        df_trades["Lag(Price) Distinct"] = np.where(
-            df_trades["temp_lag_price"] == df_trades["Price"],
-            np.NaN,
-            df_trades["temp_lag_price"],
-        )
-        df_trades["Lag(Price) Distinct"].ffill(inplace=True)
-        df_trades.drop("temp_lag_price", 1, inplace=True)
-
-        # Merge Quotes and Trades
-        df_quotes["Type"] = "Quote"
-        df_all = pd.concat(
-            [
-                df_quotes[["Date-Time", "Type", "Ask Price", "Bid Price", "Seq. No."]],
-                df_trades[
-                    [
-                        "Date-Time",
-                        "Price",
-                        "Lag(Price) Distinct",
-                        "Acc Volume",
-                        "Seq. No.",
-                    ]
-                ],
-            ],
-            sort=True,
-        ).sort_values(by=["Date-Time", "Seq. No."])
-
-        df_all["Type"].fillna(value="Trade", inplace=True)
-        df_all["Ask Price"].ffill(inplace=True)
-        df_all["Bid Price"].ffill(inplace=True)
-        df_trades_all = df_all[df_all["Type"] == "Trade"].copy(deep=True)
-        df_trades_all.reset_index(drop=True, inplace=True)
-
-        # Mid Quote
-        df_trades_all["Mid Quote"] = (
-            df_trades_all["Ask Price"] + df_trades_all["Bid Price"]
-        ) / 2
-
-        # Finding Tick Dir (Lee and Ready)
-        # Buy
-        df_trades_all["case1"] = np.where(
-            df_trades_all["Price"] > df_trades_all["Mid Quote"], 1, 0
-        )
-        # Sell
-        df_trades_all["case2"] = np.where(
-            df_trades_all["Price"] < df_trades_all["Mid Quote"], -1, 0
-        )
-        # Buy
-        df_trades_all["case3"] = np.where(
-            (df_trades_all["Price"] == df_trades_all["Mid Quote"])
-            & (df_trades_all["Price"] > df_trades_all["Lag(Price) Distinct"]),
-            1,
-            0,
-        )
-        # Sell
-        df_trades_all["case4"] = np.where(
-            (df_trades_all["Price"] == df_trades_all["Mid Quote"])
-            & (df_trades_all["Price"] < df_trades_all["Lag(Price) Distinct"]),
-            -1,
-            0,
-        )
-
-        df_trades_all["Tick Dir"] = (
-            df_trades_all["case1"]
-            + df_trades_all["case2"]
-            + df_trades_all["case3"]
-            + df_trades_all["case4"]
-        )
-        df_trades_all["Signed Trade SQRT"] = df_trades_all["Tick Dir"] * np.sqrt(
-            df_trades_all["Acc Volume"]
-        )
-        df_trades_all["Signed Trade"] = df_trades_all["Tick Dir"] * (
-            df_trades_all["Acc Volume"]
-        )
-
-        print(df_trades_all.head(30))
+        df_trades_all = enrich_with_trades_features(df_quotes, quotes_keys, df_trades)
 
         # Calculate some instantanous measures
         df_quotes["Spread"] = df_quotes["Ask Price"] - df_quotes["Bid Price"]
@@ -207,11 +112,7 @@ def run(file_name, args):
             df_quotes["Ask Price"] * (1 / df_quotes["Ask Size"])
             + df_quotes["Bid Price"] * (1 / df_quotes["Bid Size"])
         ) / (1 / df_quotes["Ask Size"] + 1 / df_quotes["Bid Size"])
-        df_quotes["Quote Imbalance"] = np.log(df_quotes["Ask Size"]) - np.log(
-            df_quotes["Bid Size"]
-        )
-
-        # ***********************************************
+        df_quotes["Quote Imbalance"] = np.log(df_quotes["Ask Size"]) - np.log(df_quotes["Bid Size"])
 
         # calulating the tick indices
         vol = df_trades_all["Acc Volume"]
@@ -234,53 +135,41 @@ def run(file_name, args):
         # inds_timestamps = df_quotes.loc[inds, "Date-Time"].values
         # print("The timestmps for indices for ticks:\n {}".format(inds_timestamps[:5]))
         df_quotes.dropna(inplace=True)
-        print("len inds:{}".format(len(inds)))
+        print("len inds: {}".format(len(inds)))
 
         trades_times = df_trades_all["Date-Time"]
         trades_inds = []
         for ind in inds:
-            trade_ind = trades_times[
-                trades_times > df_quotes.loc[ind, "Date-Time"]
-            ].index.min()
+            trade_ind = trades_times[trades_times > df_quotes.loc[ind, "Date-Time"]].index.min()
             trades_inds.append(trade_ind)
         print("The indices for trades_inds (5):\n {}".format(trades_inds[:5]))
-        print("len trades inds:{}".format(len(trades_inds)))
+        print("len trades inds: {}".format(len(trades_inds)))
         print(df_trades_all.loc[trades_inds])
         trades_inds_enclosed = [0] + trades_inds
         for i in range(len(trades_inds_enclosed) - 1):
-            df_trades_all.loc[
-                trades_inds_enclosed[i + 1], "Order Imbalance"
-            ] = df_trades_all.loc[
+            df_trades_all.loc[trades_inds_enclosed[i + 1], "Order Imbalance"] = df_trades_all.loc[
                 trades_inds_enclosed[i] + 1 : trades_inds_enclosed[i + 1]
-            ][
-                "Signed Trade"
-            ].sum()
-            df_trades_all.loc[
-                trades_inds_enclosed[i + 1], "Open Price"
-            ] = df_trades_all.loc[trades_inds_enclosed[i], "Price"]
-            df_trades_all.loc[
-                trades_inds_enclosed[i + 1], "Close Price"
-            ] = df_trades_all.loc[trades_inds_enclosed[i + 1], "Price"]
-            df_trades_all.loc[
-                trades_inds_enclosed[i + 1], "Avg Trade Size"
-            ] = df_trades_all.loc[
+            ]["Signed Trade"].sum()
+            df_trades_all.loc[trades_inds_enclosed[i + 1], "Open Price"] = df_trades_all.loc[
+                trades_inds_enclosed[i], "Price"
+            ]
+            df_trades_all.loc[trades_inds_enclosed[i + 1], "Close Price"] = df_trades_all.loc[
+                trades_inds_enclosed[i + 1], "Price"
+            ]
+            df_trades_all.loc[trades_inds_enclosed[i + 1], "Avg Trade Size"] = df_trades_all.loc[
                 trades_inds_enclosed[i] + 1 : trades_inds_enclosed[i + 1]
-            ][
-                "Acc Volume"
-            ].mean()
-            df_trades_all.loc[
-                trades_inds_enclosed[i + 1], "Net SellBuy Count"
-            ] = safe_division(
+            ]["Acc Volume"].mean()
+            df_trades_all.loc[trades_inds_enclosed[i + 1], "Net SellBuy Count"] = safe_division(
                 sum(
-                    df_trades_all.loc[
-                        trades_inds_enclosed[i] + 1 : trades_inds_enclosed[i + 1]
-                    ]["Tick Dir"]
+                    df_trades_all.loc[trades_inds_enclosed[i] + 1 : trades_inds_enclosed[i + 1]][
+                        "Tick Dir"
+                    ]
                     == -1
                 ),
                 sum(
-                    df_trades_all.loc[
-                        trades_inds_enclosed[i] + 1 : trades_inds_enclosed[i + 1]
-                    ]["Tick Dir"]
+                    df_trades_all.loc[trades_inds_enclosed[i] + 1 : trades_inds_enclosed[i + 1]][
+                        "Tick Dir"
+                    ]
                     == 1
                 ),
             )
@@ -295,7 +184,7 @@ def run(file_name, args):
         df_trades_ticks.reset_index(inplace=True, drop=True)
         print("df_trades_ticks.shape", df_trades_ticks.shape)
         print("df_trades_ticks columns", df_trades_ticks.columns)
-        keys = keys + [
+        quotes_keys = quotes_keys + [
             "Spread",
             "Mid Quote",
             "Smart Price",
@@ -304,48 +193,111 @@ def run(file_name, args):
         df_TW_avg = TW_avg(
             input_df=df_quotes,
             datetime_col="Date-Time",
-            keys=keys,
-            timestamp_cutoffs=df_quotes.loc[
-                df_quotes.index[inds_enclosed], "Date-Time"
-            ].values,
+            keys=quotes_keys,
+            timestamp_cutoffs=df_quotes.loc[df_quotes.index[inds_enclosed], "Date-Time"].values,
             fillforward=True,
         )
         print("df_TW_avg.shape", df_TW_avg.shape)
         print("df_TW_avg columns", df_TW_avg.columns)
-        print(df_TW_avg.head())
+        print(df_TW_avg.head(5))
 
-        df_bars = set_df_labels(
-            df_quotes,
-            pt_level=float(args.pt_level),
-            sl_level=float(args.sl_level),
-            wait_time=timedelta(seconds=int(args.wait_time)),
-            inds=inds,
-        )
+        # label_cols
+        base_label_cols = [
+            "long_label",
+            "long_return",
+            "long_duration",
+            "pt_long_ind",
+            "sl_long_ind",
+            "short_label",
+            "short_return",
+            "short_duration",
+            "pt_short_ind",
+            "sl_short_ind",
+            "end_ind",
+        ]
+
+        df_bars_list = [None] * 3
+        for i, (pt_level, sl_level) in enumerate(
+            [(0.0005, 0.0005), (0.0010, 0.0010), (0.0015, 0.0015)]
+        ):
+            print(
+                f"labeling with {pt_level}, {sl_level}",
+            )
+            df_bars_list[i] = set_df_labels(
+                df_quotes,
+                pt_level=float(pt_level),
+                sl_level=float(sl_level),
+                wait_time=timedelta(seconds=int(args.wait_time)),
+                inds=inds,
+            )
+
+        df_bars = df_bars_list[0][quotes_keys + ["Date-Time", "dailyVolatility"]]
+        for i in range(len(df_bars_list)):
+            new_labels = [f"{key}_{i+1}" for key in base_label_cols]
+            df_bars[new_labels] = df_bars_list[i][base_label_cols]
+
         print(
-            "Deleting unused quotes dataframes of total size {}, {},{},{} (KB)".format(
+            "Deleting unused quotes dataframes of total size {}, {},{} (KB)".format(
                 (sys.getsizeof(df_trades)) // 1024,
                 (sys.getsizeof(df_quotes)) // 1024,
                 (sys.getsizeof(df_trades_all)) // 1024,
-                (sys.getsizeof(df_all)) // 1024,
             )
         )
         del df_trades
         del df_quotes
         del df_trades_all
-        del df_all
 
         print("df_bars.shape", df_bars.shape)
-        TW_avg_keys = ["TW Avg " + key for key in keys]
+        TW_avg_keys = ["TW Avg " + key for key in quotes_keys]
         df_bars = pd.concat([df_bars, df_TW_avg[TW_avg_keys], df_trades_ticks], axis=1)
 
-        # print('final col names {}'.format(df_bars.columns))
+        # Adding new columns
+        diff_train_cols = [f"{col}_diff_1" for col in quotes_keys]
+        df_bars[diff_train_cols] = df_bars[quotes_keys].diff()
+        df_bars["BidAskRatio"] = df_bars["Bid Size"] / df_bars["Ask Size"]
+        df_bars["TW Avg BidAskRatio"] = df_bars["TW Avg Bid Size"] / df_bars["TW Avg Ask Size"]
+        df_bars["tick_duration"] = df_bars["Date-Time"].diff()
+
+        train_cols = (
+            quotes_keys  # basic columns to have first diff
+            + diff_train_cols  # added diffs
+            + TW_avg_keys
+            + [
+                "dailyVolatility",
+                "BidAskRatio",
+                "TW Avg BidAskRatio",
+                "tick_duration",
+                "Order Imbalance",
+                "Close Price",
+                "Avg Trade Size",
+                "Net SellBuy Count",
+            ]
+        )
+        label_cols_list = [[f"{key}_{i+1}" for key in base_label_cols] for i in range(3)]
+        label_cols = label_cols_list[0] + label_cols_list[1] + label_cols_list[2]
+
+        df_bars = df_bars[train_cols + label_cols]
+        print(df_bars.head())
+        print("final col names {}".format(df_bars.columns))
         # df_1day_merged.to_csv(os.path.join('../data/test/', os.path.basename(raw_file_name))[:-3])
-        num_pt_long = len(df_bars[df_bars["long_label"] == 1])
-        num_sl_long = len(df_bars[df_bars["long_label"] == -1])
-        num_te_long = len(df_bars[df_bars["long_label"] == 0])
-        num_pt_short = len(df_bars[df_bars["short_label"] == 1])
-        num_sl_short = len(df_bars[df_bars["short_label"] == -1])
-        num_te_short = len(df_bars[df_bars["short_label"] == 0])
+        num_pt_long = [
+            len(df_bars[df_bars[f"long_label_{i+1}"] == 1]) for i in range(len(df_bars_list))
+        ]
+        num_sl_long = [
+            len(df_bars[df_bars[f"long_label_{i+1}"] == -1]) for i in range(len(df_bars_list))
+        ]
+        num_te_long = [
+            len(df_bars[df_bars[f"long_label_{i+1}"] == 0]) for i in range(len(df_bars_list))
+        ]
+        num_pt_short = [
+            len(df_bars[df_bars[f"short_label_{i+1}"] == 1]) for i in range(len(df_bars_list))
+        ]
+        num_sl_short = [
+            len(df_bars[df_bars[f"short_label_{i+1}"] == -1]) for i in range(len(df_bars_list))
+        ]
+        num_te_short = [
+            len(df_bars[df_bars[f"short_label_{i+1}"] == 0]) for i in range(len(df_bars_list))
+        ]
         print(
             "{}, shape: {}, num_pt_long: {}, num_sl_long: {}, num_te_long: {}, num_pt_short: {}, num_sl_short: {}, num_te_short: {}".format(
                 os.path.basename(file_name),
@@ -377,11 +329,6 @@ def run(file_name, args):
         print("{0} was labeled in :{1:5.1f}".format(file_name, end - start))
 
     except Exception as e:
-        print(
-            "corresponding trades file for {} not found".format(
-                os.path.basename(file_name)
-            )
-        )
         print(e)
         result = "{}, shape: {}, num_pt_long: {}, num_sl_long: {}, num_te_long: {}, num_pt_short: {}, num_sl_short: {}, num_te_short: {}".format(
             os.path.basename(file_name),
